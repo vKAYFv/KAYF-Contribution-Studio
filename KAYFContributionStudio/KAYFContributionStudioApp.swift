@@ -19,7 +19,16 @@ struct KAYFContributionStudioApp: App {
             }
             CommandMenu("Contribution") {
                 Button("Regenerate Pattern") { state.regenerate() }.keyboardShortcut("r", modifiers: .command).disabled(state.project == nil)
-                Button("Create Commit Plan") { state.createCommitPlan() }.keyboardShortcut("g", modifiers: [.command, .shift]).disabled(state.project == nil)
+                Button("Generate…") {
+                    if state.project?.commitPlan == nil { state.createCommitPlan() }
+                    else { Task { await state.performDryRun() } }
+                }
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                .disabled(state.project == nil)
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { state.selection = .settings }
+                    .keyboardShortcut(",", modifiers: .command)
             }
         }
     }
