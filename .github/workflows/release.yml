@@ -1,0 +1,100 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, notarize, and publish
+    runs-on: macos-15
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Validate release credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            MACOS_CERTIFICATE
+            MACOS_CERTIFICATE_PASSWORD
+            MACOS_SIGN_IDENTITY
+            KEYCHAIN_PASSWORD
+            APPLE_ID
+            APPLE_TEAM_ID
+            APPLE_APP_SPECIFIC_PASSWORD
+          )
+          for variable in "${required[@]}"; do
+            if [[ -z "${!variable}" ]]; then
+              echo "::error::$variable is not configured as a repository secret"
+              exit 1
+            fi
+          done
+
+      - name: Import Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/kayf-signing.keychain-db"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$certificate_path"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security import "$certificate_path" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+
+      - name: Configure Apple notarization
+        shell: bash
+        run: |
+          xcrun notarytool store-credentials "kayf-notary" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+
+      - name: Run unit and integration tests
+        shell: bash
+        run: |
+          xcodebuild test \
+            -project KAYFContributionStudio.xcodeproj \
+            -scheme KAYFContributionStudio \
+            -destination "platform=macOS" \
+            CODE_SIGNING_ALLOWED=NO \
+            -only-testing:KAYFContributionStudioTests
+
+      - name: Build signed and notarized DMG
+        shell: bash
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_PROFILE: kayf-notary
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: scripts/build-dmg.sh "${GITHUB_REF_NAME#v}"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/KAYF-Contribution-Studio-$version.dmg#KAYF Contribution Studio $version" \
+            "dist/KAYF-Contribution-Studio-$version.dmg.sha256#SHA-256 checksum" \
+            --verify-tag \
+            --generate-notes \
+            --latest \
+            --title "KAYF Contribution Studio $version"
